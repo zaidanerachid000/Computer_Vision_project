@@ -1,0 +1,34 @@
+## Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+## Virtual env
+.venv/
+venv/
+
+## IDE
+.vscode/
+
+## Runs/artifacts
+runs/
+data/processed/
+*.pt
+*.pth
+
+## OS
+Thumbs.db
+desktop.ini
+
+# Datasets (do not commit)
+Dataset/
+dataset/
+
+# Outputs
+models/
+results/
+

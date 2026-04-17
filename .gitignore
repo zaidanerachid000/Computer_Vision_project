@@ -27,6 +27,7 @@ desktop.ini
 # Datasets (do not commit)
 Dataset/
 dataset/
+CV_dataset/
 
 # Outputs
 models/

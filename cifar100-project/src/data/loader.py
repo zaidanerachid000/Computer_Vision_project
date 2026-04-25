@@ -1,47 +1,21 @@
 
 import pickle
+from pathlib import Path
+from typing import Dict, Any
+
 import numpy as np
-import matplotlib.pyplot as plt
-import os
 
 
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
-def load_data(file):
-    with open(file, 'rb') as f:
-        data = pickle.load(f, encoding='bytes')
-    return data
-
-# Chargement des données
-train_data = load_data('../../../../CV_dataset/train/train')
-
-# Extraction des données
-X = train_data[b'data']          
-y = train_data[b'fine_labels']   
-
-# --- TRAITEMENT D'UNE IMAGE ---
-img = X[79]
-
-# Reshape pour passer de 1D (3072) à 3D (Channels, Height, Width)
-# CIFAR est stocké en (3, 32, 32)
-img = img.reshape(3, 32, 32)
+def load_pickle_data(file_path: str | Path) -> Dict[bytes, Any]:
+    """Load a CIFAR pickle file and return its dictionary payload."""
+    file_path = Path(file_path)
+    with file_path.open("rb") as file_obj:
+        return pickle.load(file_obj, encoding="bytes")
 
 
-# Transpose pour mettre les canaux à la fin (Height, Width, Channels)
-# C'est le format attendu par Matplotlib
-img = np.transpose(img, (1, 2, 0))
-
-# Conversion en uint8 pour éviter les problèmes d'affichage avec imshow
-img = img.astype("uint16")
-
-# --- AFFICHAGE ---
-plt.figure(figsize=(4, 4))
-plt.imshow(img)
-plt.title(f"Label: {y[79]}")
-plt.axis('off') # Cache les axes
-plt.show()
-
-# Affichage avec interpolation bilinéaire
-plt.imshow(img, interpolation='bilinear')
-plt.axis('off')
-plt.show()
+def load_features_and_labels(file_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load flattened images and fine labels from a CIFAR-100 train file."""
+    data = load_pickle_data(file_path)
+    features = np.asarray(data[b"data"], dtype=np.uint8)
+    labels = np.asarray(data[b"fine_labels"], dtype=np.int64)
+    return features, labels

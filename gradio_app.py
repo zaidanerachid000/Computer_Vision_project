@@ -170,8 +170,22 @@ except Exception as e:
 
 
 # =============================================================================
-# ETAPE 4 -- Fonctions de prediction
+# ETAPE 4 -- Smart Crop + Fonctions de prediction
 # =============================================================================
+
+def smart_crop(pil_img, crop_pct=100):
+    """
+    Crop le centre de l'image pour eliminer le background (ocean, ciel...).
+    crop_pct=100 -> pas de crop ; crop_pct=60 -> garde 60% central.
+    """
+    if crop_pct >= 100:
+        return pil_img
+    W, H = pil_img.size
+    r = crop_pct / 100.0
+    mw = int(W * (1 - r) / 2)
+    mh = int(H * (1 - r) / 2)
+    return pil_img.crop((mw, mh, W - mw, H - mh))
+
 
 def predict_resnet(pil_img, top_k=5):
     """
@@ -220,96 +234,89 @@ def predict_efficientnet(pil_img, top_k=5, confidence_threshold=0.8):
     return results
 
 
-# =============================================================================
-# ETAPE 5 -- Rendu visuel (overlay sur l'image)
-# =============================================================================
+def predict_ensemble(pil_img, top_k=5):
+    """
+    Combine ResNet18 (100 classes, poids 60%) + EfficientNet (20 classes, poids 40%).
+    Retourne (resultats_fusionnes, resultats_resnet, resultats_effnet).
+    """
+    resnet_results = predict_resnet(pil_img, top_k=100)
+    effnet_results = predict_efficientnet(pil_img, top_k=20, confidence_threshold=0.0)
 
-def conf_color(score):
-    """Vert si confiant, jaune si moyen, rouge si faible."""
-    if score > 0.6:
-        return (34, 197, 94)   # vert
-    elif score > 0.3:
-        return (234, 179, 8)   # jaune
-    else:
-        return (239, 68, 68)   # rouge
+    scores = {}
+    for label, score in resnet_results:
+        scores[label] = scores.get(label, 0) + score * 0.6
+    for label, score in effnet_results:
+        if label != 'Inconnu':
+            scores[label] = scores.get(label, 0) + score * 0.4
+
+    fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    return fused, resnet_results[:top_k], effnet_results[:top_k]
 
 
-def draw_overlay(pil_img, results, model_name):
-    """Dessine un panneau de resultats en bas de l'image."""
-    img  = pil_img.copy().convert('RGB').resize((480, 360))
-    draw = ImageDraw.Draw(img)
-    W, H = img.size
-    pad  = 10
-    oh   = min(len(results) * 38 + 50, 250)
-
-    # Fond sombre en bas
-    draw.rectangle([0, H - oh, W, H], fill=(10, 10, 20))
-    draw.text((pad, H - oh + 6), "Model: %s" % model_name, fill=(148, 163, 184))
-
-    for i, (label, score) in enumerate(results):
-        y     = H - oh + 30 + i * 38
-        color = conf_color(score)
-        bw    = int(score * (W - 2 * pad - 120))
-        draw.rectangle([pad + 110, y + 6, pad + 110 + bw, y + 28], fill=color)
-        draw.rectangle([pad + 110, y + 6, W - pad,        y + 28],
-                       outline=(80, 80, 80), width=1)
-        draw.text((pad,    y + 6), '%d. %s' % (i + 1, label[:18]), fill=(255, 255, 255))
-        draw.text((W - 58, y + 6), '%5.1f%%' % (score * 100),      fill=color)
-
-    return img
+# L'ancien overlay a ete supprime car il cachait l'image.
+# Nous utilisons maintenant gr.Label() pour un affichage propre.
 
 
 # =============================================================================
 # ETAPE 6 -- Callbacks Gradio
 # =============================================================================
 
-def predict_frame(frame, model_choice, confidence_threshold):
+def predict_frame(frame, model_choice, confidence_threshold, crop_pct=100):
     """
     Callback principal : webcam ou upload.
-    model_choice : 'EfficientNet (20 classes)' ou 'ResNet18 (100 classes)'
+    model_choice : 'EfficientNet', 'ResNet18', ou 'Ensemble'
+    crop_pct     : pourcentage du centre a conserver (50-100)
     """
     if frame is None:
         return None, 'En attente de l\'image...'
 
     pil = Image.fromarray(frame) if isinstance(frame, np.ndarray) else frame
+    pil = smart_crop(pil, crop_pct)  # <-- crop central
 
     try:
-        use_efficientnet = "EfficientNet" in model_choice
+        if 'Ensemble' in model_choice:
+            fused, rn_res, en_res = predict_ensemble(pil, top_k=5)
+            results = fused
+            model_name = 'Ensemble (ResNet60% + EffNet40%)'
+            # Texte detaille
+            top_label, top_score = results[0]
+            icon = '[CONFIANT]' if top_score > 0.6 else ('[MOYEN]' if top_score > 0.3 else '[FAIBLE]')
+            status_text = (
+                '%s  %s   --   %.1f%%\n\n' % (icon, top_label.upper(), top_score * 100)
+                + '-- Ensemble fusionne --\n'
+                + '\n'.join('  %d. %-20s %.1f%%' % (i+1, l, s*100) for i,(l,s) in enumerate(results))
+                + '\n\n-- ResNet18 (100 cls) --\n'
+                + '\n'.join('  %d. %-20s %.1f%%' % (i+1, l, s*100) for i,(l,s) in enumerate(rn_res))
+                + '\n\n-- EfficientNet (20 cls) --\n'
+                + '\n'.join('  %d. %-20s %.1f%%' % (i+1, l, s*100) for i,(l,s) in enumerate(en_res))
+            )
 
-        if use_efficientnet:
-            results    = predict_efficientnet(pil, top_k=5,
-                                              confidence_threshold=confidence_threshold)
-            model_name = "EfficientNet -- 20 classes"
+        elif 'EfficientNet' in model_choice:
+            results    = predict_efficientnet(pil, top_k=5, confidence_threshold=confidence_threshold)
+            model_name = 'EfficientNet -- 20 classes'
+            top_label, top_score = results[0]
+            icon = '[CONFIANT]' if top_score > 0.6 else ('[MOYEN]' if top_score > 0.3 else '[FAIBLE]')
+            status_text = 'Modele: %s\nMeilleure prediction: %s (%.1f%%)' % (model_name, top_label, top_score * 100)
         else:
             results    = predict_resnet(pil, top_k=5)
-            model_name = "ResNet18 -- 100 classes"
+            model_name = 'ResNet18 -- 100 classes'
+            top_label, top_score = results[0]
+            icon = '[CONFIANT]' if top_score > 0.6 else ('[MOYEN]' if top_score > 0.3 else '[FAIBLE]')
+            status_text = 'Modele: %s\nMeilleure prediction: %s (%.1f%%)' % (model_name, top_label, top_score * 100)
 
     except Exception as e:
-        return pil, 'Erreur : %s' % str(e)
+        return pil, {'Erreur': 1.0}, 'Erreur : %s' % str(e)
 
-    top_label, top_score = results[0]
-
-    if top_score > 0.6:
-        icon = '[CONFIANT]'
-    elif top_score > 0.3:
-        icon = '[MOYEN]'
-    else:
-        icon = '[FAIBLE]'
-
-    status_text = (
-        '%s  %s   --   %.1f%%\n\n' % (icon, top_label.upper(), top_score * 100)
-        + '\n'.join(
-            '  %d. %-20s %.1f%%' % (i + 1, label, score * 100)
-            for i, (label, score) in enumerate(results)
-        )
-    )
-
-    return draw_overlay(pil, results, model_name), status_text
+    # Convertir results (liste de tuples) en dictionnaire pour gr.Label
+    confidences = {label: score for label, score in results}
+    
+    # Renvoyer l'image croppee (sans dessin pardessus!), les confiances pour le Label, et le texte detaille
+    return pil, confidences, status_text
 
 
-def predict_upload(image, model_choice, confidence_threshold):
+def predict_upload(image, model_choice, confidence_threshold, crop_pct=100):
     """Callback pour l'onglet Upload."""
-    return predict_frame(image, model_choice, confidence_threshold)
+    return predict_frame(image, model_choice, confidence_threshold, crop_pct)
 
 
 # =============================================================================
@@ -367,20 +374,29 @@ with gr.Blocks(title='CIFAR-100 Detector | ResNet18 + EfficientNet') as demo:
     # Controles
     with gr.Row():
         model_choice = gr.Radio(
-            choices=["EfficientNet (20 classes)", "ResNet18 (100 classes)"],
-            value="EfficientNet (20 classes)",
+            choices=[
+                "EfficientNet (20 classes)",
+                "ResNet18 (100 classes)",
+                "🏆 Ensemble (Les 2 modeles)"
+            ],
+            value="ResNet18 (100 classes)",
             label="Choisir le modele",
             info=(
-                "EfficientNet -> 20 premieres classes CIFAR-100 "
-                "(apple, baby, bear, beaver, bed, bee, beetle, bicycle, bottle, bowl...)\n"
-                "ResNet18     -> toutes les 100 classes CIFAR-100"
+                "EfficientNet -> 20 classes | ResNet18 -> 100 classes | "
+                "Ensemble -> fusionne les 2 (meilleure precision)"
             )
         )
-        confidence_slider = gr.Slider(
-            minimum=0.0, maximum=1.0, value=0.8, step=0.05,
-            label="Seuil de confiance (EfficientNet uniquement)",
-            info="En dessous de ce seuil, EfficientNet affiche 'Inconnu'"
-        )
+        with gr.Column():
+            confidence_slider = gr.Slider(
+                minimum=0.0, maximum=1.0, value=0.8, step=0.05,
+                label="Seuil de confiance (EfficientNet uniquement)",
+                info="En dessous de ce seuil, EfficientNet affiche 'Inconnu'"
+            )
+            crop_slider = gr.Slider(
+                minimum=50, maximum=100, value=100, step=5,
+                label="🔍 Crop central (%)",
+                info="Reduit a X% central de l'image pour focaliser sur le sujet (ex: 70% = elimine les bords)"
+            )
 
     # Onglets
     with gr.Tabs():
@@ -397,9 +413,10 @@ with gr.Blocks(title='CIFAR-100 Detector | ResNet18 + EfficientNet') as demo:
                         webcam_options=gr.WebcamOptions(mirror=False),
                     )
                 with gr.Column(scale=2):
-                    cam_out_img  = gr.Image(height=240, show_label=False)
+                    cam_out_img  = gr.Image(height=240, show_label=False, visible=False) # On le cache, c'est juste un feedback visuel
+                    cam_out_label = gr.Label(num_top_classes=5, label="Resultats")
                     cam_out_text = gr.Textbox(
-                        lines=8,
+                        lines=5,
                         interactive=False,
                         show_label=False,
                         placeholder='Pointe ta camera vers un objet...',
@@ -407,8 +424,8 @@ with gr.Blocks(title='CIFAR-100 Detector | ResNet18 + EfficientNet') as demo:
 
             cam.stream(
                 fn=predict_frame,
-                inputs=[cam, model_choice, confidence_slider],
-                outputs=[cam_out_img, cam_out_text],
+                inputs=[cam, model_choice, confidence_slider, crop_slider],
+                outputs=[cam_out_img, cam_out_label, cam_out_text],
                 stream_every=0.4,
             )
 
@@ -425,9 +442,10 @@ with gr.Blocks(title='CIFAR-100 Detector | ResNet18 + EfficientNet') as demo:
                     )
                     analyze_btn = gr.Button("Analyser", variant="primary", size="lg")
                 with gr.Column(scale=2):
-                    upload_out_img  = gr.Image(height=240, show_label=False)
+                    upload_out_img  = gr.Image(height=240, show_label=False, visible=False) # On le cache
+                    upload_out_label = gr.Label(num_top_classes=5, label="Resultats")
                     upload_out_text = gr.Textbox(
-                        lines=8,
+                        lines=5,
                         interactive=False,
                         show_label=False,
                         placeholder="Upload une image puis clique sur Analyser...",
@@ -435,8 +453,8 @@ with gr.Blocks(title='CIFAR-100 Detector | ResNet18 + EfficientNet') as demo:
 
             analyze_btn.click(
                 fn=predict_upload,
-                inputs=[upload_input, model_choice, confidence_slider],
-                outputs=[upload_out_img, upload_out_text],
+                inputs=[upload_input, model_choice, confidence_slider, crop_slider],
+                outputs=[upload_out_img, upload_out_label, upload_out_text],
             )
 
     # Legende
